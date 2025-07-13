@@ -1,0 +1,57 @@
+# 専門用語変換辞書ファイル (change_library.txt)
+# 
+# 使用方法:
+# - 1行に1つの変換ルールを記述
+# - 形式: "元のテキスト=変換後のテキスト"
+# - 例: pyttsx3=パイティーティーエスエックススリー
+# - コメント行は # で始める
+# - 空行は無視される
+#
+# 注意:
+# - ファイルはUTF-8エンコーディングで保存してください
+# - アプリケーション実行中にファイルを編集した場合は、
+#   アプリケーションを再起動して辞書を再読み込みしてください
+#
+# 変換ルール:
+
+pyttsx3=パイティーティーエスエックススリー
+RESTful=レストフル
+Flask=フラスク
+Git=ギット
+GitHub=ギットハブ
+JSON=ジェイソン
+XML=エックスエムエル
+HTTP=エイチティーティーピー
+HTTPS=エイチティーティーピーエス
+WiFi=ワイファイ
+Bluetooth=ブルートゥース
+USB=ユーエスビー
+HDMI=エイチディーエムアイ
+RAM=ラム
+CLI=シーエルアイ
+REST=レスト
+OAuth=オーオース
+Bootstrap=ブートストラップ
+jQuery=ジェイクエリ
+React=リアクト
+Vue=ビュー
+Angular=アンギュラー
+yarn=ヤーン
+Docker=ドッカー
+Kubernetes=クバネティス
+AWS=エーダブリュエス
+Azure=アジュール
+CI/CD=シーアイスラッシュシーディー
+DevOps=デブオプス
+Agile=アジャイル
+Scrum=スクラム
+Kanban=カンバン
+Sprint=スプリント
+Backlog=バックログ
+User Story=ユーザーストーリー
+Epic=エピック
+Sprint Planning=スプリントプランニング
+Daily Standup=デイリースタンドアップ
+Retrospective=レトロスペクティブ
+Node=ノード
+coefont=コエフォント

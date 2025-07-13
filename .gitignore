@@ -1,0 +1,12 @@
+# 仮想環境フォルダ
+venv/
+
+# キャッシュフォルダ
+__pycache__/
+
+# 音声ファイル
+*.wav
+
+# inputフォルダ
+input/*
+!input/sample.txt
