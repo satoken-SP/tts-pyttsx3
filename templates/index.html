@@ -693,7 +693,15 @@
                 html += `</div>`;
                 html += `<div style="margin-top: 15px;"><p style="color: #666;">音声ファイルは "output" フォルダに保存されました。</p></div>`;
             } else if (filename) {
-                html += `<div style="margin-top: 15px;"><a href="/download/${filename}" class="btn btn-secondary">音声ファイルをダウンロード</a></div>`;
+                // キャッシュ防止のためタイムスタンプを付与
+                const timestamp = Date.now();
+                html += `<div style="margin-top: 15px; display: flex; align-items: center; gap: 15px;">
+                    <a href="/download/${filename}" class="btn btn-secondary">音声ファイルをダウンロード</a>
+                    <audio id="audio-player" controls style="height: 40px;">
+                        <source src="/download/${filename}?t=${timestamp}" type="audio/wav">
+                        お使いのブラウザは audio タグをサポートしていません。
+                    </audio>
+                </div>`;
             }
             
             result.innerHTML = html;
