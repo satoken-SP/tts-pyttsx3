@@ -2,6 +2,8 @@
 
 Pythonライブラリのpyttsx3を使って、テキストから音声変換したファイルを出力するツールです。
 
+<img src="./image/image1.png" alt="" width=500px>
+
 ## 特徴
 
 - インストールされるツールの容量は100MB以下と軽量
