@@ -2,6 +2,7 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
+    <meta name="csrf-token" content="{{ csrf_token }}">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>pyttsx3 テキスト音声変換ツール</title>
     <style>
@@ -475,6 +476,7 @@
                     <div class="folder-info">
                         <p><strong>入力フォルダ:</strong> input/</p>
                         <p><strong>出力フォルダ:</strong> output/</p>
+                        <p>一括処理は最大{{ max_batch_files }}ファイル・合計{{ max_batch_characters }}文字です。上限を超える場合は分けて実行してください。</p>
                         <p style="color: #666; font-size: 0.9em;">※ inputフォルダ内のtxtファイルを1ファイルずつ処理します</p>
                     </div>
                     <div style="margin-top: 15px;">
@@ -509,8 +511,11 @@
             
             <div class="output-section" id="output-section">
                 <h3>出力ファイル名（.wav）</h3>
-                <input type="text" id="outputFilename" value="output.wav">
+                <input type="text" id="outputFilename" placeholder="空欄で日時を自動設定（例：20261023-1801.wav）" maxlength="100">
+                <p>空欄なら日本時間の日時で命名します。同じ分の変換には -2、-3 を付けます。</p>
+                <p>Webの一時音声は24時間・合計2GiB・100件まで。上限超過時は古い音声から削除します。必要な音声はダウンロードして保存してください。</p>
             </div>
+            <p>変換は1件ずつ実行します。処理時間は1ファイル{{ max_file_minutes }}分・一括{{ max_job_minutes }}分、音声容量は1ファイル{{ max_file_gib }}GiB・一括{{ max_job_gib }}GiBまでです。制限に達した場合は中断します。</p>
 
             <div class="loading" id="loading">
                 <div class="spinner"></div>
@@ -626,6 +631,7 @@
                 
                 const response = await fetch('/convert', {
                     method: 'POST',
+                    headers: { 'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content },
                     body: formData
                 });
                 
@@ -635,84 +641,115 @@
                     if (data.input_type === 'folder') {
                         showSuccess(data.message, null, null, data.total_conversion_time, data.processed_files);
                     } else {
-                        showSuccess(data.message, data.processed_text, data.filename, data.conversion_time);
+                        showSuccess(data.message, data.processed_text, data.filename, data.conversion_time, null, data.download_id);
                     }
                 } else {
-                    showError(data.error);
+                    showError(data.error, data.error_id);
                 }
             } catch (error) {
-                showError('通信エラーが発生しました: ' + error.message);
+                showError('通信に失敗しました。アプリの起動状態を確認して再試行してください。');
             } finally {
                 loading.style.display = 'none';
             }
         }
 
+        // 入力由来の内容はHTMLとして解釈せず、テキストとして表示する。
+        function createResultElement(tagName, text = '', className = '') {
+            const element = document.createElement(tagName);
+            element.textContent = text;
+            if (className) {
+                element.className = className;
+            }
+            return element;
+        }
+
         // 成功メッセージ表示
-        function showSuccess(message, processedText, filename, conversionTime, processedFiles) {
+        function showSuccess(message, processedText, filename, conversionTime, processedFiles, downloadId) {
             const result = document.getElementById('result');
             result.className = 'result-section result-success';
             result.style.display = 'block';
             
-            let html = `<h4>✅ ${message}`;
+            let headingText = `✅ ${message}`;
             if (conversionTime) {
-                html += `（変換秒数：${conversionTime}秒）`;
+                headingText += `（変換秒数：${conversionTime}秒）`;
             }
-            html += `</h4>`;
+            result.replaceChildren(createResultElement('h4', headingText));
             
             if (processedText) {
-                html += `
-                    <div class="collapsible-text">
-                        <div class="collapsible-header collapsed" onclick="toggleCollapsible(this)">
-                            <span>変換後のテキストを表示</span>
-                            <span class="toggle-icon">▼</span>
-                        </div>
-                        <div class="collapsible-content">
-                            <div class="collapsible-text-content">${processedText}</div>
-                        </div>
-                    </div>
-                `;
+                const container = createResultElement('div', '', 'collapsible-text');
+                const header = createResultElement('div', '', 'collapsible-header collapsed');
+                header.append(
+                    createResultElement('span', '変換後のテキストを表示'),
+                    createResultElement('span', '▼', 'toggle-icon')
+                );
+                header.addEventListener('click', () => toggleCollapsible(header));
+                const content = createResultElement('div', '', 'collapsible-content');
+                content.append(createResultElement('div', processedText, 'collapsible-text-content'));
+                container.append(header, content);
+                result.append(container);
             }
             
             if (processedFiles) {
                 // フォルダ処理の結果表示
-                html += `<div style="margin-top: 15px;"><h5>処理結果:</h5>`;
-                html += `<div style="max-height: 300px; overflow-y: auto; border: 1px solid #e9ecef; border-radius: 8px; padding: 10px; background: #f8f9fa;">`;
+                const folderResults = createResultElement('div');
+                folderResults.style.marginTop = '15px';
+                folderResults.append(createResultElement('h5', '処理結果:'));
+                const fileList = createResultElement('div');
+                fileList.style.cssText = 'max-height: 300px; overflow-y: auto; border: 1px solid #e9ecef; border-radius: 8px; padding: 10px; background: #f8f9fa;';
                 
                 processedFiles.forEach(file => {
+                    const row = createResultElement('div');
+                    row.style.cssText = 'margin: 5px 0; padding: 5px; border-radius: 4px;';
                     if (file.status === 'success') {
-                        html += `<div style="margin: 5px 0; padding: 5px; background: #d4edda; border-radius: 4px;">`;
-                        html += `✅ ${file.filename} → ${file.output_filename} (${file.conversion_time}秒)`;
-                        html += `</div>`;
+                        row.style.background = '#d4edda';
+                        row.textContent = `✅ ${file.filename} → ${file.output_filename} (${file.conversion_time}秒)`;
                     } else {
-                        html += `<div style="margin: 5px 0; padding: 5px; background: #f8d7da; border-radius: 4px;">`;
-                        html += `❌ ${file.filename}: ${file.message}`;
-                        html += `</div>`;
+                        row.style.background = '#f8d7da';
+                        row.textContent = `❌ ${file.filename}: ${file.message}`;
+                        if (file.error_id) row.append(document.createTextNode(` エラーID：${file.error_id}`));
                     }
+                    fileList.append(row);
                 });
                 
-                html += `</div>`;
-                html += `<div style="margin-top: 15px;"><p style="color: #666;">音声ファイルは "output" フォルダに保存されました。</p></div>`;
-            } else if (filename) {
+                folderResults.append(fileList);
+                const notice = createResultElement('div');
+                notice.style.marginTop = '15px';
+                const noticeText = createResultElement('p', '音声ファイルは "output" フォルダに保存されました。');
+                noticeText.style.color = '#666';
+                notice.append(noticeText);
+                folderResults.append(notice);
+                result.append(folderResults);
+            } else if (filename && downloadId) {
                 // キャッシュ防止のためタイムスタンプを付与
                 const timestamp = Date.now();
-                html += `<div style="margin-top: 15px; display: flex; align-items: center; gap: 15px;">
-                    <a href="/download/${filename}" class="btn btn-secondary">音声ファイルをダウンロード</a>
-                    <audio id="audio-player" controls style="height: 40px;">
-                        <source src="/download/${filename}?t=${timestamp}" type="audio/wav">
-                        お使いのブラウザは audio タグをサポートしていません。
-                    </audio>
-                </div>`;
+                const downloadUrl = `/download/${encodeURIComponent(downloadId)}`;
+                const download = createResultElement('div');
+                download.style.cssText = 'margin-top: 15px; display: flex; align-items: center; gap: 15px;';
+                const link = createResultElement('a', '音声ファイルをダウンロード', 'btn btn-secondary');
+                link.href = downloadUrl;
+                const player = document.createElement('audio');
+                player.id = 'audio-player';
+                player.controls = true;
+                player.style.height = '40px';
+                const source = document.createElement('source');
+                source.src = `${downloadUrl}?t=${timestamp}`;
+                source.type = 'audio/wav';
+                player.append(source, document.createTextNode('お使いのブラウザは audio タグをサポートしていません。'));
+                download.append(link, player);
+                result.append(download);
             }
-            
-            result.innerHTML = html;
         }
 
         // エラーメッセージ表示
-        function showError(message) {
+        function showError(message, errorId) {
             const result = document.getElementById('result');
             result.className = 'result-section result-error';
             result.style.display = 'block';
-            result.innerHTML = `<h4>❌ エラー</h4><p>${message}</p>`;
+            result.replaceChildren(
+                createResultElement('h4', '❌ エラー'),
+                createResultElement('p', message)
+            );
+            if (errorId) result.append(createResultElement('p', `エラーID：${errorId}`));
         }
 
         // 折りたたみ機能の制御
@@ -749,4 +786,4 @@
         });
     </script>
 </body>
-</html> 
+</html>

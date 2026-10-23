@@ -1,5 +1,6 @@
 import argparse
 import os
+import conversion_limits as limits
 
 def load_pronunciation_dictionary(file_path: str = "change_library.txt") -> dict:
     """
@@ -41,14 +42,22 @@ def load_pronunciation_dictionary(file_path: str = "change_library.txt") -> dict
 # 辞書ファイルから読み込み
 CUSTOM_PRONUNCIATIONS = load_pronunciation_dictionary()
 
-def apply_pronunciations(text: str, dic: dict = None) -> str:
+def apply_pronunciations(text: str, dic: dict = None, max_length=None) -> str:
     """
     テキスト内の用語を辞書に従って置換する。
     """
     if dic is None:
         dic = CUSTOM_PRONUNCIATIONS
+    max_length = limits.MAX_TEXT_LENGTH if max_length is None else max_length
+    if len(text) > max_length:
+        raise limits.ConversionLimitError(f'テキストは最大{max_length:,}文字までです。')
     
     for term, reading in dic.items():
+        if not isinstance(term, str) or not term or not isinstance(reading, str):
+            raise limits.ConversionLimitError('辞書のキーは空にできません。用語と読みを確認してください。')
+        projected_length = len(text) + text.count(term) * (len(reading) - len(term))
+        if projected_length > max_length:
+            raise limits.ConversionLimitError(f'辞書変換後のテキストは最大{max_length:,}文字までです。')
         text = text.replace(term, reading)
     return text
 
@@ -66,8 +75,7 @@ def main():
         exit(1)
 
     # テキスト読み込み
-    with open(args.input_file, encoding="utf-8") as f:
-        content = f.read()
+    content = limits.read_text_file(args.input_file)
 
     # 置換処理
     converted = apply_pronunciations(content)
