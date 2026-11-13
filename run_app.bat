@@ -11,6 +11,15 @@ if not exist "venv\Scripts\python.exe" (
     exit /b 1
 )
 
+"venv\Scripts\python.exe" -c "import sys" >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] The virtual environment's Python is unavailable.
+    echo Rename the venv folder, then run install.bat to recreate it.
+    popd
+    pause
+    exit /b 1
+)
+
 "venv\Scripts\python.exe" "app.py"
 set "app_exit_code=%errorlevel%"
 

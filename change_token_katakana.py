@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import conversion_limits as limits
 
 def load_pronunciation_dictionary(file_path: str = "change_library.txt") -> dict:
@@ -39,15 +40,13 @@ def load_pronunciation_dictionary(file_path: str = "change_library.txt") -> dict
     
     return dictionary
 
-# 辞書ファイルから読み込み
-CUSTOM_PRONUNCIATIONS = load_pronunciation_dictionary()
-
 def apply_pronunciations(text: str, dic: dict = None, max_length=None) -> str:
     """
-    テキスト内の用語を辞書に従って置換する。
+    元のテキストを左から一度だけ置換する。同じ位置では長い用語を優先する。
+    辞書を省略した場合は毎回ファイルを読み直す。
     """
     if dic is None:
-        dic = CUSTOM_PRONUNCIATIONS
+        dic = load_pronunciation_dictionary()
     max_length = limits.MAX_TEXT_LENGTH if max_length is None else max_length
     if len(text) > max_length:
         raise limits.ConversionLimitError(f'テキストは最大{max_length:,}文字までです。')
@@ -55,11 +54,25 @@ def apply_pronunciations(text: str, dic: dict = None, max_length=None) -> str:
     for term, reading in dic.items():
         if not isinstance(term, str) or not term or not isinstance(reading, str):
             raise limits.ConversionLimitError('辞書のキーは空にできません。用語と読みを確認してください。')
-        projected_length = len(text) + text.count(term) * (len(reading) - len(term))
-        if projected_length > max_length:
+    if not dic:
+        return text
+
+    # 正規表現の特殊文字も単語の一部として扱う。置換結果は再走査しない。
+    pattern = re.compile('|'.join(re.escape(term) for term in sorted(dic, key=len, reverse=True)))
+    parts = []
+    end = 0
+    output_length = 0
+    for match in pattern.finditer(text):
+        reading = dic[match.group()]
+        output_length += match.start() - end + len(reading)
+        if output_length > max_length:
             raise limits.ConversionLimitError(f'辞書変換後のテキストは最大{max_length:,}文字までです。')
-        text = text.replace(term, reading)
-    return text
+        parts.extend((text[end:match.start()], reading))
+        end = match.end()
+    if output_length + len(text) - end > max_length:
+        raise limits.ConversionLimitError(f'辞書変換後のテキストは最大{max_length:,}文字までです。')
+    parts.append(text[end:])
+    return ''.join(parts)
 
 def main():
     parser = argparse.ArgumentParser(

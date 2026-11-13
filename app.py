@@ -12,6 +12,7 @@ from output_files import timestamp_name, available_name, synthesize_new_file
 import conversion_limits as limits
 from speech_runner import stop_all_workers
 from error_reporting import record_error
+import pronunciation_editor as pronunciation_editor
 
 class UploadRequest(Request):
     """容量・項目数の超過で解析が中断されても、作成済みストリームを閉じる。"""
@@ -105,7 +106,13 @@ def protect_local_response(response):
     # トークンを含む画面の保存や、外部ページへの埋め込みを防ぐ。
     response.headers['Cache-Control'] = 'no-store'
     response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['Content-Security-Policy'] = "frame-ancestors 'none'"
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'none'; script-src 'self'; script-src-attr 'none'; "
+        "style-src 'self'; style-src-attr 'none'; connect-src 'self'; "
+        "media-src 'self'; img-src 'self'; base-uri 'none'; object-src 'none'; "
+        "form-action 'self'; frame-ancestors 'none'"
+    )
     response.headers['Referrer-Policy'] = 'no-referrer'
     response.headers['Cross-Origin-Resource-Policy'] = 'same-origin'
     return response
@@ -184,10 +191,6 @@ app.config.update(
     MAX_FORM_PARTS=MAX_FORM_PARTS,
 )
 
-# 辞書を読み込み
-pronunciation_dictionary = load_pronunciation_dictionary()
-
-
 @app.errorhandler(RequestEntityTooLarge)
 def request_too_large(error):
     return jsonify({
@@ -245,6 +248,161 @@ def index():
         max_file_gib=f'{limits.MAX_OUTPUT_BYTES / (1024 ** 3):g}',
         max_job_gib=f'{limits.MAX_JOB_OUTPUT_BYTES / (1024 ** 3):g}')
 
+def create_registered_audio(processed_text, rate, safe_filename, automatic_filename=True):
+    """Preview and full conversion share synthesis, retention and cleanup rules."""
+    descriptor, output_path = tempfile.mkstemp(suffix='.wav', dir=audio_directory.name)
+    os.close(descriptor)
+    registered = False
+    try:
+        synthesize_text(text=processed_text, play=False, save_path=output_path, rate=rate, volume=1.0)
+        if not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
+            raise RuntimeError('音声ファイルの作成に失敗しました。')
+        download_id = secrets.token_hex(32)
+        with generated_audio_lock:
+            size = os.path.getsize(output_path)
+            if size > MAX_RETAINED_AUDIO_BYTES:
+                raise limits.ConversionLimitError('生成音声が一時保存の上限2GiBを超えています。入力を分割してください。', 507)
+            if not prune_audio_locked(incoming_bytes=size, incoming_files=1):
+                raise limits.ConversionLimitError('一時音声の保存容量を確保できません。再生・ダウンロード完了後に再試行してください。', 507)
+            if automatic_filename:
+                safe_filename = available_name(safe_filename, {name for _, name in generated_audio.values()})
+            generated_audio[download_id] = (output_path, safe_filename)
+            generated_audio_times[download_id] = time.monotonic()
+        registered = True
+        return download_id, safe_filename
+    finally:
+        if not registered:
+            try:
+                os.remove(output_path)
+            except FileNotFoundError:
+                pass
+
+
+def editor_json(required, optional=()):
+    data = request.get_json(silent=True)
+    if (not isinstance(data, dict) or not set(required) <= set(data)
+            or set(data) - set(required) - set(optional)):
+        raise limits.ConversionLimitError('要求の項目が正しくありません。')
+    return data
+
+
+@app.route('/pronunciations', methods=['GET'])
+def pronunciation_state():
+    return jsonify(pronunciation_editor.state())
+
+
+@app.route('/pronunciations/save', methods=['POST'])
+def save_pronunciation():
+    data = editor_json(('term', 'reading'))
+    try:
+        result = pronunciation_editor.save_word(data['term'], data['reading'])
+    except limits.ConversionLimitError:
+        raise
+    except Exception as error:
+        payload = internal_error_payload(error, 'request')
+        payload['error'] = '読みを保存できませんでした。再試行してください。'
+        return jsonify(payload), 500
+    payload = {'success': True, 'saved': True, 'exclusion_removed': result['exclusion_removed']}
+    if not result['exclusion_removed']:
+        details = internal_error_payload(result['error'], 'request')
+        payload.update(warning='読みは保存済みです。除外の解除に失敗しました。', error_id=details['error_id'])
+    return jsonify(payload)
+
+
+@app.route('/pronunciations/open-file', methods=['POST'])
+def open_pronunciation_file():
+    editor_json(())
+    # Only the application's dictionary can be opened; never accept a client path.
+    path = pronunciation_editor.DICTIONARY_PATH.absolute()
+    if not path.is_file():
+        return jsonify(error='change_library.txtが見つかりません。'), 404
+    try:
+        os.startfile(str(path), 'open')
+    except OSError as error:
+        payload = internal_error_payload(error, 'request')
+        payload['error'] = 'ファイルを開けませんでした。Windowsで.txtファイルを開く既定のアプリを確認してください。'
+        return jsonify(payload), 500
+    return jsonify(success=True)
+
+
+@app.route('/pronunciations/exclude', methods=['POST'])
+def exclude_pronunciation():
+    data = editor_json(('term', 'excluded'))
+    if not isinstance(data['excluded'], bool):
+        raise limits.ConversionLimitError('除外の指定が正しくありません。')
+    pronunciation_editor.set_excluded(data['term'], data['excluded'])
+    return jsonify(success=True)
+
+
+@app.route('/pronunciations/candidates', methods=['POST'])
+def pronunciation_candidates():
+    if request.mimetype not in ('multipart/form-data', 'application/x-www-form-urlencoded'):
+        raise limits.ConversionLimitError('フォーム形式で送信してください。', 415)
+    if (set(request.form) - {'inputType', 'text'} or set(request.files) - {'file'}
+            or any(len(values) != 1 for _, values in request.form.lists())
+            or any(len(values) != 1 for _, values in request.files.lists())):
+        raise limits.ConversionLimitError('要求の項目が正しくありません。')
+    kind = request.form.get('inputType')
+    documents = []
+    if kind == 'text':
+        text = request.form.get('text', '')
+        limits.validate_text(text)
+        documents.append(('', text))
+    elif kind == 'file':
+        uploaded = request.files.get('file')
+        if uploaded is None or not uploaded.filename:
+            raise limits.ConversionLimitError('ファイルを選択してください。')
+        raw = uploaded.read(limits.MAX_INPUT_BYTES + 1)
+        if len(raw) > limits.MAX_INPUT_BYTES:
+            raise limits.ConversionLimitError('ファイルサイズは500KiB以下にしてください。')
+        try:
+            text = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            raise limits.ConversionLimitError('ファイルはUTF-8で保存してください。') from None
+        limits.validate_text(text)
+        documents.append((os.path.basename(uploaded.filename), text))
+    elif kind == 'folder':
+        if not os.path.isdir('input'):
+            raise limits.ConversionLimitError('inputフォルダが存在しません。')
+        with os.scandir('input') as entries:
+            for entry in entries:
+                if entry.name.endswith('.txt') and entry.is_file(follow_symlinks=False):
+                    if len(documents) >= limits.MAX_BATCH_FILES:
+                        raise limits.ConversionLimitError('フォルダは最大20ファイルまでです。')
+                    limits.validate_filename(entry.name)
+                    text = limits.read_text_file(entry.path)
+                    documents.append((entry.name, text))
+        if not documents:
+            raise limits.ConversionLimitError('inputフォルダにtxtファイルがありません。')
+        documents.sort()
+    else:
+        raise limits.ConversionLimitError('入力方法が正しくありません。')
+    if sum(len(text) for _, text in documents) > limits.MAX_BATCH_CHARACTERS:
+        raise limits.ConversionLimitError('対象の文章が長すぎます。分けて確認してください。')
+    return jsonify(pronunciation_editor.extract_candidates(documents))
+
+
+@app.route('/pronunciations/preview', methods=['POST'])
+@limits.serialized_conversion
+def preview_pronunciation():
+    data = editor_json(('term', 'sentence', 'mode', 'rate'), ('reading',))
+    term = pronunciation_editor.validate_word(data['term'])
+    sentence = data['sentence']
+    limits.validate_text(sentence, limit=pronunciation_editor.MAX_CONTEXT_LENGTH)
+    limits.validate_options(data['rate'])
+    if term not in sentence:
+        raise limits.ConversionLimitError('試聴する文に対象の単語がありません。')
+    rules = load_pronunciation_dictionary()
+    if data['mode'] == 'proposed':
+        rules[term] = pronunciation_editor.validate_word(data.get('reading'), reading=True)
+    elif data['mode'] != 'current':
+        raise limits.ConversionLimitError('試聴方法が正しくありません。')
+    processed = apply_pronunciations(sentence, rules, max_length=2000)
+    limits.validate_text(processed, limit=2000)
+    download_id, _ = create_registered_audio(processed, data['rate'], 'preview.wav')
+    return jsonify(download_id=download_id, processed_text=processed)
+
+
 @app.route('/convert', methods=['POST'])
 @limits.serialized_conversion
 def convert_text():
@@ -258,6 +416,8 @@ def convert_text():
             output_filename = timestamp_name() + '.wav'
         input_type = request.form.get('inputType')
         rate = int(request.form.get('rate', 200))  # ここで先に取得
+        # 変換ごとに最新の辞書を取得。一括処理中は同じスナップショットを使う。
+        pronunciation_dictionary = load_pronunciation_dictionary()
         
         # 危険な文字やパスをチェック
         dangerous_chars = ['/', '\\', '..', '~', ':', '*', '?', '"', '<', '>', '|']
@@ -425,41 +585,9 @@ def convert_text():
         processed_text = apply_pronunciations(content, pronunciation_dictionary, max_length=MAX_TEXT_LENGTH)
         limits.validate_text(processed_text, limit=MAX_TEXT_LENGTH)
         
-        # 専用領域へ衝突しない名前で保存し、完成後にだけ公開する。
-        descriptor, output_path = tempfile.mkstemp(suffix='.wav', dir=audio_directory.name)
-        os.close(descriptor)
-        registered = False
-        try:
-            synthesize_text(
-                text=processed_text,
-                play=False,
-                save_path=output_path,
-                rate=rate,
-                volume=1.0
-            )
-            if not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
-                raise RuntimeError('音声ファイルの作成に失敗しました。')
+        download_id, safe_filename = create_registered_audio(
+            processed_text, rate, safe_filename, automatic_filename)
 
-            download_id = secrets.token_hex(32)
-            with generated_audio_lock:
-                size = os.path.getsize(output_path)
-                if size > MAX_RETAINED_AUDIO_BYTES:
-                    return jsonify({'error': '生成音声が一時保存の上限2GiBを超えています。入力を分割してください。'}), 507
-                if not prune_audio_locked(incoming_bytes=size, incoming_files=1):
-                    return jsonify({'error': '一時音声の保存容量を確保できません。再生・ダウンロード完了後に再試行してください。'}), 507
-                if automatic_filename:
-                    safe_filename = available_name(
-                        safe_filename, {name for _, name in generated_audio.values()})
-                generated_audio[download_id] = (output_path, safe_filename)
-                generated_audio_times[download_id] = time.monotonic()
-            registered = True
-        finally:
-            if not registered:
-                try:
-                    os.remove(output_path)
-                except FileNotFoundError:
-                    pass
-        
         # 変換完了時間を計算
         end_time = time.time()
         conversion_time = round(end_time - start_time, 2)
